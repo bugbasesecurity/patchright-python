@@ -52,6 +52,20 @@ jobs:
             PLAYWRIGHT_TARGET_WHEEL=$wheel uv build --wheel
           done
 
+      # patchright-python bundles a vanilla driver (its stealth is Python-layer), so
+      # the driver-level networkidle exclusion has to be added to the bundled
+      # coreBundle.js here at build time - via ts-morph AST (no string replace, no
+      # marker), then the wheel RECORD is fixed so the wheel stays install-valid.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Patch networkidle into bundled driver (ts-morph)
+        run: |
+          npm install
+          python3 patch_wheels_networkidle.py playwright-python/dist
+
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -77,12 +91,12 @@ jobs:
           body: |
             Custom patchright build based on playwright-python ${{ github.event.inputs.playwright_version }}.
 
-            The networkidle captcha/analytics/heartbeat exclusion is applied at the
-            **driver level** (ts-morph `framesPatch.ts`) in the bugbasesecurity
-            patchright driver fork, which this package downloads instead of the
-            upstream driver. No post-extraction JS patching in this package.
-
-            Driver: https://github.com/bugbasesecurity/patchright/releases/tag/v${{ github.event.inputs.patchright_release }}
+            Stealth is upstream patchright's Python-layer patching (unchanged). This
+            fork additionally excludes captcha/analytics/heartbeat requests from
+            `networkidle` by patching the bundled driver's `coreBundle.js`
+            (`_inflightRequestStarted`/`_inflightRequestFinished`) via **ts-morph AST**
+            at build time - no string replace, no marker comment - and fixing the
+            wheel RECORD. Same exclusion list as the driver-repo `framesPatch.ts`.
 
             Install: `pip install patchright@https://github.com/bugbasesecurity/patchright-python/releases/download/v${{ github.event.inputs.patchright_release }}/patchright-${{ github.event.inputs.patchright_release }}-py3-none-manylinux1_x86_64.whl`
           files: dist/*.whl

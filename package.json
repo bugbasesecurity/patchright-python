@@ -1,0 +1,7 @@
+{
+  "name": "patchright-python-networkidle-patch",
+  "private": true,
+  "type": "module",
+  "description": "ts-morph tooling to add the networkidle exclusion to the bundled driver at build time",
+  "dependencies": { "ts-morph": "^24.0.0" }
+}
