@@ -27,10 +27,10 @@ def record_hash(data: bytes) -> str:
 
 def patch_wheel(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as z:
-        names = z.namelist()
-        if CORE not in names:
+        infos = z.infolist()  # keep ZipInfo so we preserve Unix perms (driver/node is +x)
+        if CORE not in z.namelist():
             raise SystemExit(f"{wheel.name}: {CORE} not found in wheel")
-        contents = {n: z.read(n) for n in names}
+        contents = {zi.filename: z.read(zi.filename) for zi in infos}
 
     with tempfile.TemporaryDirectory() as td:
         core_path = Path(td) / "coreBundle.js"
@@ -47,11 +47,11 @@ def patch_wheel(wheel: Path) -> None:
     contents[record_name] = ("\n".join(rows) + "\n").encode()
 
     tmp = wheel.with_suffix(".whl.tmp")
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, data in contents.items():
-            z.writestr(name, data)
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for zi in infos:  # reuse original ZipInfo -> keeps external_attr (Unix perms)
+            zout.writestr(zi, contents[zi.filename])
     tmp.replace(wheel)
-    print(f"patched networkidle into {wheel.name}")
+    print(f"patched networkidle into {wheel.name} (perms preserved)")
 
 
 def main() -> None:
