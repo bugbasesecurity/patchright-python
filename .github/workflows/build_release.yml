@@ -75,17 +75,14 @@ jobs:
           tag_name: v${{ github.event.inputs.patchright_release }}
           name: patchright v${{ github.event.inputs.patchright_release }}
           body: |
-            Custom patchright build with networkidle captcha blacklisting.
+            Custom patchright build based on playwright-python ${{ github.event.inputs.playwright_version }}.
 
-            Based on playwright-python ${{ github.event.inputs.playwright_version }}.
+            The networkidle captcha/analytics/heartbeat exclusion is applied at the
+            **driver level** (ts-morph `framesPatch.ts`) in the bugbasesecurity
+            patchright driver fork, which this package downloads instead of the
+            upstream driver. No post-extraction JS patching in this package.
 
-            **Captcha domains excluded from networkidle:**
-            - challenges.cloudflare.com (Cloudflare Turnstile)
-            - google.com/recaptcha (reCAPTCHA)
-            - www.gstatic.com/recaptcha (reCAPTCHA assets)
-            - hcaptcha.com (hCaptcha)
-            - api.funcaptcha.com (Arkose Labs)
-            - client-api.arkoselabs.com (Arkose Labs)
+            Driver: https://github.com/bugbasesecurity/patchright/releases/tag/v${{ github.event.inputs.patchright_release }}
 
             Install: `pip install patchright@https://github.com/bugbasesecurity/patchright-python/releases/download/v${{ github.event.inputs.patchright_release }}/patchright-${{ github.event.inputs.patchright_release }}-py3-none-manylinux1_x86_64.whl`
           files: dist/*.whl
