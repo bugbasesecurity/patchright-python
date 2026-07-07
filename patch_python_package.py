@@ -5,10 +5,43 @@ import os
 import toml
 
 patchright_version = os.environ.get('patchright_release') or os.environ.get('playwright_version')
+patchright_driver_version = os.environ.get('patchright_driver_version') or patchright_version
+
+# The patched Playwright driver (Patchright stealth + our networkidle captcha
+# blacklist, both baked in at the driver level via ts-morph) is published on our
+# nodejs fork's GitHub releases. The python wheel must download THAT driver, not
+# build a vanilla one from npm.
+DRIVER_REPO = "bugbasesecurity/patchright"
 
 def patch_file(file_path: str, patched_tree: ast.AST) -> None:
     with open(file_path, "w") as f:
         f.write(ast.unparse(ast.fix_missing_locations(patched_tree)))
+
+def patch_driver_version_file() -> None:
+    # Playwright-Python 1.61+ reads driver_version from a DRIVER_VERSION file
+    # instead of a string constant in setup.py. Pin it to the patchright driver
+    # version so the download URL resolves to our published release asset.
+    driver_version_file = "playwright-python/DRIVER_VERSION"
+    if os.path.exists(driver_version_file):
+        with open(driver_version_file, "w") as f:
+            f.write(f"{patchright_driver_version}\n")
+
+def patch_ensure_driver_bundle(node: ast.FunctionDef) -> None:
+    # Playwright-Python 1.61+ assembles the driver bundle from the vanilla
+    # playwright-core npm package via ensure_driver_bundle(). Replace its body so
+    # it downloads our patched driver ZIP from the fork's GitHub releases instead.
+    if node.name != "ensure_driver_bundle":
+        return
+    node.body = ast.parse(f'''\
+destination_path = f"driver/playwright-{{driver_version}}-{{zip_name}}.zip"
+if os.path.exists(destination_path):
+    return
+os.makedirs("driver", exist_ok=True)
+url = f"https://github.com/{DRIVER_REPO}/releases/download/v{{driver_version}}/playwright-{{driver_version}}-{{zip_name}}.zip"
+subprocess.check_call(["curl", "-L", "--fail", "-o", destination_path, url])
+if not os.path.exists(destination_path):
+    raise RuntimeError(f"Driver bundle {{destination_path}} was not downloaded.")
+''').body
 
 # Adding _repo_version.py (Might not be intended but fixes the build)
 with open("playwright-python/playwright/_repo_version.py", "w") as f:
@@ -37,24 +70,30 @@ with open("playwright-python/pyproject.toml", "r") as f:
     with open("playwright-python/pyproject.toml", "w") as f:
         toml.dump(pyproject_source, f)
 
+# Pin DRIVER_VERSION (Playwright-Python 1.61+ file-based driver version)
+patch_driver_version_file()
+
 # Patching setup.py
 with open("playwright-python/setup.py") as f:
     setup_source = f.read()
     setup_tree = ast.parse(setup_source)
 
     for node in ast.walk(setup_tree):
-        # Modify driver_version
+        # Redirect the 1.61+ driver bundle download to our patched release asset
+        if isinstance(node, ast.FunctionDef):
+            patch_ensure_driver_bundle(node)
+
+        # Modify driver_version (pre-1.61 string-constant form; no-op on 1.61+)
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.targets[0], ast.Name):
             if node.targets[0].id == "driver_version" and node.value.value.startswith("1."):
-                # node.value.value = node.value.value.split("-")[0]
-                node.value.value = patchright_version
+                node.value.value = patchright_driver_version
 
-        # Modify url
+        # Modify url (pre-1.61 cdn form; no-op on 1.61+)
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.targets[0], ast.Name):
             if node.targets[0].id == "url" and node.value.value in ("https://cdn.playwright.dev/builds/driver/", "https://playwright.azureedge.net/builds/driver/"):
                 node.value = ast.JoinedStr(
                     values=[
-                        ast.Constant(value='https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/releases/download/v'),
+                        ast.Constant(value=f'https://github.com/{DRIVER_REPO}/releases/download/v'),
                         ast.FormattedValue(value=ast.Name(id='driver_version', ctx=ast.Load()), conversion=-1),
                         ast.Constant(value='/')
                     ]
@@ -479,7 +518,7 @@ with open("playwright-python/playwright/async_api/_generated.py") as f:
 
                     # Modify the inner function call inside return statement
                     for subnode in ast.walk(node):
-                        if isinstance(subnode, ast.Call) and subnode.func.attr == node.name:
+                        if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute) and subnode.func.attr == node.name:
                             subnode.keywords.append(
                                 ast.keyword(arg="isolatedContext",
                                             value=ast.Name(id="isolated_context",
@@ -499,7 +538,7 @@ with open("playwright-python/playwright/async_api/_generated.py") as f:
                     node.args.kw_defaults.append(ast.Constant(value=None))
 
                     for subnode in ast.walk(node):
-                        if isinstance(subnode, ast.Call) and subnode.func.attr == node.name:
+                        if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute) and subnode.func.attr == node.name:
                             subnode.keywords.append(
                                 ast.keyword(arg="focusControl", value=ast.Name(id="focus_control", ctx=ast.Load()))
                             )
@@ -526,7 +565,7 @@ with open("playwright-python/playwright/sync_api/_generated.py") as f:
 
                     # Modify the inner function call inside return statement
                     for subnode in ast.walk(node):
-                        if isinstance(subnode, ast.Call) and subnode.func.attr == node.name:
+                        if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute) and subnode.func.attr == node.name:
                             subnode.keywords.append(
                                 ast.keyword(arg="isolatedContext",
                                             value=ast.Name(id="isolated_context",
@@ -549,7 +588,7 @@ with open("playwright-python/playwright/sync_api/_generated.py") as f:
 
                     if class_node.name != "BrowserContext" and node.name != "new_page":
                         for subnode in ast.walk(node):
-                            if isinstance(subnode, ast.Call) and subnode.func.attr == node.name:
+                            if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute) and subnode.func.attr == node.name:
                                 subnode.keywords.append(
                                     ast.keyword(arg="focusControl", value=ast.Name(id="focus_control", ctx=ast.Load()))
                                 )
@@ -579,55 +618,11 @@ for python_file in glob.glob("playwright-python/playwright/**.py") + glob.glob("
 
         patch_file(python_file, file_tree)
 
-# Patching setup.py to add networkidle captcha blacklisting
-# This injects a function that patches the driver's frames.js after extraction
-# to exclude captcha polling requests from networkidle calculations
-with open("playwright-python/setup.py") as f:
-    setup_code = f.read()
-
-NETWORKIDLE_PATCH_CODE = '''
-import re as _re
-
-_EXCLUDED_PATTERNS_JS = '["challenges.cloudflare.com","google.com/recaptcha","www.gstatic.com/recaptcha","hcaptcha.com","api.funcaptcha.com","client-api.arkoselabs.com","google-analytics.com","googletagmanager.com","analytics.google.com","hotjar.com","fullstory.com","logrocket.com","mouseflow.com","clarity.ms","browser-intake-datadoghq.com","sentry.io","newrelic.com","nr-data.net","forter.com","/heartbeat","/keepalive","/keep-alive","/beacon"]'
-_PATCH_MARKER = '// [patchright-networkidle-blacklist]'
-_CAPTCHA_CHECK = f'const _reqUrl = request.url();\\n    if ({_EXCLUDED_PATTERNS_JS}.some(p => _reqUrl.includes(p)))\\n      return;'
-
-def _patch_networkidle_blacklist(driver_root):
-    for dirpath, _, filenames in os.walk(driver_root):
-        for f in filenames:
-            if f == 'frames.js' and 'server' in dirpath:
-                fpath = os.path.join(dirpath, f)
-                code = open(fpath).read()
-                if _PATCH_MARKER in code:
-                    return
-                for method in ['_inflightRequestStarted', '_inflightRequestFinished']:
-                    pat = _re.compile(rf'({method}\\(request\\) \\{{[^}}]*?if \\(request\\._isFavicon\\)\\s*return;)', _re.DOTALL)
-                    m = pat.search(code)
-                    if m:
-                        code = code.replace(m.group(1), m.group(1) + f'\\n    {_PATCH_MARKER}\\n    {_CAPTCHA_CHECK}', 1)
-                open(fpath, 'w').write(code)
-                print(f'Patched networkidle blacklist: {fpath}')
-                return
-'''
-
-# Insert the function definition near the top (after imports)
-# and add calls after each extractall in _build_wheel and _download_and_extract_local_driver
-setup_code = NETWORKIDLE_PATCH_CODE + setup_code
-
-# Add _patch_networkidle_blacklist call after extraction in _build_wheel
-setup_code = setup_code.replace(
-    "extractall(zip, f\"driver/{wheel_bundle['zip_name']}\")",
-    "extractall(zip, f\"driver/{wheel_bundle['zip_name']}\")\n        _patch_networkidle_blacklist(f\"driver/{wheel_bundle['zip_name']}\")"
-)
-
-# Add _patch_networkidle_blacklist call after extraction in _download_and_extract_local_driver
-setup_code = setup_code.replace(
-    "extractall(zip, 'patchright/driver')",
-    "extractall(zip, 'patchright/driver')\n        _patch_networkidle_blacklist('patchright/driver')"
-)
-
-with open("playwright-python/setup.py", "w") as f:
-    f.write(setup_code)
+# NOTE: the networkidle captcha blacklist is applied at the DRIVER level (in the
+# bugbasesecurity/patchright nodejs fork via ts-morph framesPatch.ts) and is
+# already baked into the driver ZIP downloaded above. The old python-side
+# frames.js patch was removed: modern drivers bundle everything into
+# coreBundle.js (no standalone server/frames.js), so it patched nothing.
 
 # Rename the Package Folder to Patchright
 os.rename("playwright-python/playwright", "playwright-python/patchright")
